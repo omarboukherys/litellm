@@ -1,16 +1,20 @@
+import io
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
+from unittest.mock import Mock
 
 import httpx
 import pytest
 import respx
-from openai import AsyncAzureOpenAI, AzureOpenAI
+from openai import AsyncAzureOpenAI, AzureOpenAI, BadRequestError
 
 import litellm
 from litellm.cost_calculator import completion_cost
 from litellm.litellm_core_utils.audio_utils.utils import calculate_request_duration
+from litellm.llms.azure.audio_transcriptions import AzureAudioTranscription
+from litellm.types.utils import TranscriptionResponse
 
 AUDIO_FILE: Final = Path(__file__).parents[3] / "gettysburg.wav"
 WHISPER_COST_PER_SECOND: Final = 0.0001
@@ -319,3 +323,38 @@ async def test_azure_transcription_reports_the_clip_duration_when_the_provider_s
     expected_seconds: Final = 17.5 if response_format == "verbose_json" else calculate_request_duration(_audio_file())
     assert response.usage.type == "duration"
     assert response.usage.seconds == pytest.approx(expected_seconds)
+
+
+@pytest.mark.asyncio
+async def test_azure_async_transcription_logs_the_audio_file_when_the_request_fails() -> None:
+    logging_obj: Final = Mock(model_call_details={})
+    audio_file: Final = io.BytesIO(AUDIO_FILE.read_bytes())
+    audio_file.name = "gettysburg.wav"
+    failing_transport: Final = httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"error": {"message": "unsupported audio"}})
+    )
+
+    async with AsyncAzureOpenAI(
+        api_key="test-key",
+        api_version="2024-06-01",
+        azure_endpoint="https://example.cognitiveservices.azure.com",
+        http_client=httpx.AsyncClient(transport=failing_transport),
+    ) as client:
+        with pytest.raises(BadRequestError):
+            await AzureAudioTranscription().audio_transcriptions(
+                model="whisper-1",
+                audio_file=audio_file,
+                optional_params={},
+                logging_obj=logging_obj,
+                model_response=TranscriptionResponse(),
+                timeout=10.0,
+                max_retries=0,
+                api_key="test-key",
+                api_base="https://example.openai.azure.com",
+                api_version="2024-06-01",
+                client=client,
+                atranscription=True,
+            )
+
+    logging_obj.post_call.assert_called_once()
+    assert logging_obj.post_call.call_args.kwargs["input"] == "gettysburg.wav"

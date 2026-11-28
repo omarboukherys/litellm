@@ -1,10 +1,11 @@
+import io
 from collections.abc import Iterator
 from typing import Final
 from unittest.mock import Mock
 
 import httpx
 import pytest
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, BadRequestError, OpenAI
 
 import litellm
 from litellm.litellm_core_utils.model_cost_table import changed_in_place
@@ -72,6 +73,27 @@ async def test_async_audio_transcriptions_records_provider_response_headers():
         )
 
     _assert_headers_recorded(response, logging_obj)
+
+
+@pytest.mark.asyncio
+async def test_async_audio_transcriptions_logs_the_audio_file_when_the_request_fails():
+    logging_obj = _logging_obj()
+    audio_file: Final = io.BytesIO(b"riff-bytes")
+    audio_file.name = "audio.wav"
+    failing_transport: Final = httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"error": {"message": "unsupported audio"}})
+    )
+
+    async with httpx.AsyncClient(transport=failing_transport) as http_client:
+        with pytest.raises(BadRequestError):
+            await OpenAIAudioTranscription().audio_transcriptions(
+                client=AsyncOpenAI(api_key="transport-only", http_client=http_client),
+                atranscription=True,
+                **{**_call_kwargs(logging_obj), "audio_file": audio_file},
+            )
+
+    logging_obj.post_call.assert_called_once()
+    assert logging_obj.post_call.call_args.kwargs["input"] == "audio.wav"
 
 
 def _silent_wav(seconds: int) -> bytes:
